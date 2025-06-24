@@ -95,43 +95,42 @@ fn main() {
                     }
                 }
 
-                // Action: GenerateKeys(t) - This runs after a thread has done its work.
-                if state.pending_keys[thread_id] {
-                    let keys_requested = state
-                        .image_states
-                        .iter()
-                        .filter(|&&s| s == ImageState::PendingKey)
-                        .count();
-                    let keys_needed = keys_requested.saturating_sub(state.keys.len());
-                    if keys_needed > 0 {
-                        for _ in 0..keys_needed {
-                            state.keys.push_back(());
-                        }
-                        println!("Thread {}: Generated {} keys", thread_id, keys_needed);
-                    }
-                    state.pending_keys[thread_id] = false;
-                    cvar.notify_all();
-                    continue;
-                }
-
-                // Action: StartKeyGeneration(t) - A thread decides to do the work.
+                // Action: StartKeyGeneration(t) and GenerateKeys(t) are combined.
                 let keys_requested = state
                     .image_states
                     .iter()
                     .filter(|&&s| s == ImageState::PendingKey)
                     .count();
-                let keys_needed = keys_requested.saturating_sub(state.keys.len());
+                let keys_to_generate = keys_requested.saturating_sub(state.keys.len());
                 let no_one_generating = state.pending_keys.iter().all(|&p| !p);
-                if keys_needed > 0 && no_one_generating {
+                if keys_to_generate > 0 && no_one_generating {
+                    // Claim the right to generate keys
                     state.pending_keys[thread_id] = true;
-                    println!("Thread {}: Starting key generation", thread_id);
+                    println!(
+                        "Thread {}: Starting generation for {} key(s)...",
+                        thread_id, keys_to_generate
+                    );
 
                     // Release the lock to perform work outside the critical section
                     drop(state);
-                    thread::sleep(Duration::from_millis(500)); // Simulate intensive work
+                    // The amount of work is proportional to the number of keys needed.
+                    thread::sleep(Duration::from_millis(250 * keys_to_generate as u64));
 
-                    // After sleeping, the loop will restart, re-acquire the lock,
-                    // and the `GenerateKeys` block above will execute.
+                    // Re-acquire the lock to commit the work
+                    let mut state = lock.lock().unwrap();
+
+                    // Now perform the GenerateKeys action logic using the pre-calculated amount.
+                    for _ in 0..keys_to_generate {
+                        state.keys.push_back(());
+                    }
+                    println!(
+                        "Thread {}: Finished generating {} key(s).",
+                        thread_id, keys_to_generate
+                    );
+
+                    // Unset the flag, allowing another thread to generate if needed
+                    state.pending_keys[thread_id] = false;
+                    cvar.notify_all();
                     continue;
                 }
 
