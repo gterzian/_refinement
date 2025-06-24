@@ -1,9 +1,11 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
 // From TLA+ spec: CONSTANT N
 const N: usize = 10;
+const NUM_THREADS: usize = 2;
 
 // From TLA+ spec: ImageState == {"None", "PendingKey", "HasKey", "Loaded"}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,22 +16,17 @@ enum ImageState {
     Loaded,
 }
 
-// From TLA+ spec: keys \in {"Empty", "Generated"}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyState {
-    Empty,
-    Generated,
-}
-
 // The TLA+ spec defines `Image == 1..N`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Image(usize);
 
-// From TLA+ spec: VARIABLES image_states, keys_used, keys
+// From TLA+ spec: VARIABLES image_states, image_queue, keys_used, keys, pending_keys
 struct SharedState {
     image_states: Vec<ImageState>,
+    image_queue: VecDeque<Image>,
     keys_used: usize,
-    keys: KeyState,
+    keys: VecDeque<()>, // Represents a sequence of "Generated" keys
+    pending_keys: Vec<bool>,
 }
 
 fn main() {
@@ -37,72 +34,118 @@ fn main() {
     let pair = Arc::new((
         Mutex::new(SharedState {
             image_states: vec![ImageState::None; N],
+            image_queue: VecDeque::new(),
             keys_used: 0,
-            keys: KeyState::Empty,
+            keys: VecDeque::new(),
+            pending_keys: vec![false; NUM_THREADS],
         }),
         Condvar::new(),
     ));
 
     let mut handles = vec![];
 
-    // --- Worker Threads ---
-    // The system now uses only two threads, which handle all actions.
-    for thread_id in 0..2 {
+    for thread_id in 0..NUM_THREADS {
         let pair_clone = Arc::clone(&pair);
         let handle = thread::spawn(move || {
             loop {
                 let (lock, cvar) = &*pair_clone;
                 let mut state = lock.lock().unwrap();
 
-                // Check if all images are loaded (Done condition).
-                if state.image_states.iter().all(|&s| s == ImageState::Loaded) {
+                // Done condition
+                if state.image_states.iter().all(|&s| s == ImageState::Loaded)
+                    && state.image_queue.is_empty()
+                {
                     break;
                 }
 
                 // --- Try to perform any enabled action ---
 
-                let pending_idx = state.image_states.iter().position(|s| *s == ImageState::PendingKey);
-
-                // Action: GenerateKey
-                // Pre: (\E i: image_states[i] = "PendingKey") AND (keys = "Empty")
-                if pending_idx.is_some() && state.keys == KeyState::Empty {
-                    state.keys = KeyState::Generated;
-                    println!("Thread {}: Generated key.", thread_id);
-                    cvar.notify_all();
-                    continue;
-                }
-
-                // Action: SetKey(i)
-                // Pre: keys = "Generated" AND image_states[i] = "PendingKey"
-                if state.keys == KeyState::Generated {
-                    if let Some(idx) = pending_idx {
-                        state.keys = KeyState::Empty;
-                        state.image_states[idx] = ImageState::HasKey;
-                        state.keys_used += 1;
-                        println!("Thread {}: SetKey for image {} (total keys used: {})", thread_id, Image(idx).0, state.keys_used);
+                // Action: DequeImage(i)
+                if let Some(&image) = state.image_queue.front() {
+                    if state.image_states[image.0] == ImageState::Loaded {
+                        let dequeued_image = state.image_queue.pop_front().unwrap();
+                        // The line `keys' = <<>>` is commented out in the spec, so keys are unchanged.
+                        println!("Thread {}: Dequeued image {}", thread_id, dequeued_image.0);
                         cvar.notify_all();
                         continue;
                     }
                 }
 
                 // Action: FinishLoad(i)
-                // Pre: image_states[i] = "HasKey"
-                if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::HasKey) {
-                    state.image_states[idx] = ImageState::Loaded;
-                    println!("Thread {}: FinishLoad for image {}", thread_id, Image(idx).0);
+                if let Some(&image) = state.image_queue.front() {
+                    if state.image_states[image.0] == ImageState::HasKey {
+                        state.image_states[image.0] = ImageState::Loaded;
+                        println!("Thread {}: Finished load for image {}", thread_id, image.0);
+                        cvar.notify_all();
+                        continue;
+                    }
+                }
+
+                // Action: SetKey(i)
+                if !state.keys.is_empty() {
+                    if let Some(&image) = state.image_queue.front() {
+                        if state.image_states[image.0] == ImageState::PendingKey {
+                            state.keys.pop_front();
+                            state.image_states[image.0] = ImageState::HasKey;
+                            state.keys_used += 1;
+                            println!("Thread {}: Set key for image {}", thread_id, image.0);
+                            cvar.notify_all();
+                            continue;
+                        }
+                    }
+                }
+
+                // Action: GenerateKeys(t) - This runs after a thread has done its work.
+                if state.pending_keys[thread_id] {
+                    let keys_requested = state
+                        .image_states
+                        .iter()
+                        .filter(|&&s| s == ImageState::PendingKey)
+                        .count();
+                    let keys_needed = keys_requested.saturating_sub(state.keys.len());
+                    if keys_needed > 0 {
+                        for _ in 0..keys_needed {
+                            state.keys.push_back(());
+                        }
+                        println!("Thread {}: Generated {} keys", thread_id, keys_needed);
+                    }
+                    state.pending_keys[thread_id] = false;
                     cvar.notify_all();
                     continue;
                 }
 
+                // Action: StartKeyGeneration(t) - A thread decides to do the work.
+                let keys_requested = state
+                    .image_states
+                    .iter()
+                    .filter(|&&s| s == ImageState::PendingKey)
+                    .count();
+                let keys_needed = keys_requested.saturating_sub(state.keys.len());
+                let no_one_generating = state.pending_keys.iter().all(|&p| !p);
+                if keys_needed > 0 && no_one_generating {
+                    state.pending_keys[thread_id] = true;
+                    println!("Thread {}: Starting key generation", thread_id);
+
+                    // Release the lock to perform work outside the critical section
+                    drop(state);
+                    thread::sleep(Duration::from_millis(500)); // Simulate intensive work
+
+                    // After sleeping, the loop will restart, re-acquire the lock,
+                    // and the `GenerateKeys` block above will execute.
+                    continue;
+                }
+
                 // Action: StartLoad(i)
-                // Pre: image_states[i] = "None" AND no other image is "PendingKey"
-                if pending_idx.is_none() {
-                    if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::None) {
-                        state.image_states[idx] = ImageState::PendingKey;
-                        println!("Thread {}: StartLoad for image {}", thread_id, Image(idx).0);
-                        cvar.notify_all();
-                        continue;
-                    }
+                if let Some(idx) = state
+                    .image_states
+                    .iter()
+                    .position(|&s| s == ImageState::None)
+                {
+                    state.image_states[idx] = ImageState::PendingKey;
+                    state.image_queue.push_back(Image(idx));
+                    println!("Thread {}: Started load for image {}", thread_id, idx);
+                    cvar.notify_all();
+                    continue;
                 }
 
                 // If no action could be taken, wait for a state change.
@@ -116,23 +159,25 @@ fn main() {
     {
         let (lock, cvar) = &*pair;
         let mut state = lock.lock().unwrap();
-        // Wait until all images are fully loaded.
         while state.image_states.iter().any(|&s| s != ImageState::Loaded) {
             state = cvar.wait(state).unwrap();
         }
-    } // The lock (`state` guard) is released here.
+    }
 
     println!("\nMain thread: All images have been loaded. Joining worker threads.");
-
-    // Join on the threads to ensure they have completed before exiting.
     for handle in handles {
         handle.join().unwrap();
     }
 
     println!("\nFinal state:");
-    // Re-acquire lock to print the final state.
     let (lock, _) = &*pair;
     let state = lock.lock().unwrap();
+    assert!(state.keys.is_empty(), "Keys should be empty at the end.");
+    assert!(
+        state.image_queue.is_empty(),
+        "Image queue should be empty at the end."
+    );
     println!("  Keys used: {}", state.keys_used);
+    println!("  Image queue length: {}", state.image_queue.len());
     println!("System stopped.");
 }
