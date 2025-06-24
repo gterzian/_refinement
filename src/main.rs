@@ -5,43 +5,84 @@ use std::time::Duration;
 // From TLA+ spec: CONSTANT N
 const N: usize = 10;
 
-// From TLA+ spec: ImageState == {"None", "Loaded"}
-// The "Loading" state has been removed to more closely match the TLA+ spec,
-// which models the load operation as a single atomic action.
+// From TLA+ spec: ImageState == {"None", "PendingKey", "HasKey", "Loaded"}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageState {
     None,
+    PendingKey,
+    HasKey,
     Loaded,
 }
 
-// The TLA+ spec defines `Image == 1..N`. We represent an image's ID using the
-// newtype pattern as requested.
+// From TLA+ spec: keys \in {"Empty", "Generated"}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyState {
+    Empty,
+    Generated,
+}
+
+// The TLA+ spec defines `Image == 1..N`.
 #[derive(Debug, Clone, Copy)]
 struct Image(usize);
 
-// The shared state protected by the Mutex.
-// From TLA+ spec: VARIABLES image_states, keys_used
+// From TLA+ spec: VARIABLES image_states, keys_used, keys
 struct SharedState {
-    // `image_states` is a direct translation of the TLA+ map `[Image -> ImageState]`,
-    // where the vector index corresponds to the image ID.
     image_states: Vec<ImageState>,
-    keys_used: usize, // This will count fully loaded images
+    keys_used: usize,
+    keys: KeyState,
 }
 
 fn main() {
-    // From TLA+ spec: Init == /\ image_states = [i \in Image |-> "None"]
-    //                         /\ keys_used = 0
+    // From TLA+ spec: Init
     let pair = Arc::new((
         Mutex::new(SharedState {
             image_states: vec![ImageState::None; N],
             keys_used: 0,
+            keys: KeyState::Empty,
         }),
         Condvar::new(),
     ));
 
     let mut handles = vec![];
 
-    // Run two threads as requested.
+    // --- Key Generator Thread ---
+    // This thread is responsible for the `GenerateKey` action.
+    let key_gen_pair = Arc::clone(&pair);
+    let key_gen_handle = thread::spawn(move || {
+        loop {
+            let (lock, cvar) = &*key_gen_pair;
+            let mut state = lock.lock().unwrap();
+
+            // Wait until there is a request for a key (i.e., an image is in `PendingKey` state).
+            while state.image_states.iter().all(|&s| s != ImageState::PendingKey) {
+                state = cvar.wait(state).unwrap();
+            }
+
+            // --- Start of critical section ---
+            // Find the first image that is pending a key.
+            if let Some(idx) = state.image_states.iter().position(|&s| s == ImageState::PendingKey) {
+                println!("KeyGen: Generating key for image {}", Image(idx).0);
+
+                // Simulate key generation time.
+                thread::sleep(Duration::from_millis(150));
+
+                // Update the state to reflect that the key has been generated.
+                state.image_states[idx] = ImageState::HasKey;
+                state.keys_used += 1;
+                println!(
+                    "KeyGen: Finished generating key for image {} (total keys used: {})",
+                    Image(idx).0, state.keys_used
+                );
+
+                // Notify the main thread that a key has been generated.
+                cvar.notify_all();
+            }
+            // --- End of critical section (lock is released) ---
+        }
+    });
+    handles.push(key_gen_handle);
+
+    // --- Image Loader Threads ---
     for thread_id in 0..2 {
         let pair_clone = Arc::clone(&pair);
         let handle = thread::spawn(move || {
@@ -61,20 +102,9 @@ fn main() {
                 if let Some(idx) = work_item_index {
                     println!("Thread {}: Found image to load {}", thread_id, Image(idx).0);
 
-                    // Perform the "work". In a real system, this would be I/O.
-                    // Here, we simulate it with a sleep.
-                    // This is happening *inside* the lock, which is a direct translation
-                    // of the atomic action in the TLA+ spec, but is not a good pattern
-                    // for real-world concurrent code as it blocks other threads.
-                    thread::sleep(Duration::from_millis(250));
-
                     // This corresponds to the state change in the TLA+ action `LoadImage(i)`
-                    state.image_states[idx] = ImageState::Loaded;
-                    state.keys_used += 1;
-                    println!(
-                        "Thread {}: Finished loading image {} (total loaded: {})",
-                        thread_id, Image(idx).0, state.keys_used
-                    );
+                    state.image_states[idx] = ImageState::PendingKey;
+                    println!("Thread {}: Image {} is pending key", thread_id, Image(idx).0);
 
                     // From TLA+ spec: Done == /\ \A ii \in Image: image_states[ii] = "Loaded"
                     // We check if our work is done and notify any waiting threads.
