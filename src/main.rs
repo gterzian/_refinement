@@ -53,31 +53,24 @@ fn main() {
             let (lock, cvar) = &*key_gen_pair;
             let mut state = lock.lock().unwrap();
 
-            // Wait until there is a request for a key (i.e., an image is in `PendingKey` state).
-            while state.image_states.iter().all(|&s| s != ImageState::PendingKey) {
-                state = cvar.wait(state).unwrap();
+            // Wait until a key is requested AND the key slot is empty.
+            // Precondition for `GenerateKey`: `\E i: image_states[i] = "PendingKey" /\ keys = "Empty"`
+            state = cvar.wait_while(state, |s| {
+                (s.image_states.iter().all(|&st| st != ImageState::PendingKey) || s.keys != KeyState::Empty)
+                && s.keys_used < N
+            }).unwrap();
+
+            // If all keys have been set, no more keys will be requested.
+            if state.keys_used == N {
+                break;
             }
 
-            // --- Start of critical section ---
-            // Find the first image that is pending a key.
-            if let Some(idx) = state.image_states.iter().position(|&s| s == ImageState::PendingKey) {
-                println!("KeyGen: Generating key for image {}", Image(idx).0);
+            // As per `GenerateKey`, this thread only modifies `keys`.
+            println!("KeyGen: Generating key...");
+            state.keys = KeyState::Generated;
+            println!("KeyGen: Key is 'Generated'.");
 
-                // Simulate key generation time.
-                thread::sleep(Duration::from_millis(150));
-
-                // Update the state to reflect that the key has been generated.
-                state.image_states[idx] = ImageState::HasKey;
-                state.keys_used += 1;
-                println!(
-                    "KeyGen: Finished generating key for image {} (total keys used: {})",
-                    Image(idx).0, state.keys_used
-                );
-
-                // Notify the main thread that a key has been generated.
-                cvar.notify_all();
-            }
-            // --- End of critical section (lock is released) ---
+            cvar.notify_all(); // Notify workers that the key is ready.
         }
     });
     handles.push(key_gen_handle);
@@ -88,49 +81,62 @@ fn main() {
         let handle = thread::spawn(move || {
             loop {
                 let (lock, cvar) = &*pair_clone;
-
-                // --- Start of critical section ---
-                // The TLA+ `LoadImage` action is atomic. To model this directly,
-                // the entire process of finding, "loading", and updating state
-                // happens within a single lock.
                 let mut state = lock.lock().unwrap();
 
-                // Find an image that is not yet loaded.
-                // This corresponds to the TLA+ action precondition: `image_states[i] = "None"`
-                let work_item_index = state.image_states.iter().position(|&s| s == ImageState::None);
-
-                if let Some(idx) = work_item_index {
-                    println!("Thread {}: Found image to load {}", thread_id, Image(idx).0);
-
-                    // This corresponds to the state change in the TLA+ action `LoadImage(i)`
-                    state.image_states[idx] = ImageState::PendingKey;
-                    println!("Thread {}: Image {} is pending key", thread_id, Image(idx).0);
-
-                    // From TLA+ spec: Done == /\ \A ii \in Image: image_states[ii] = "Loaded"
-                    // We check if our work is done and notify any waiting threads.
-                    if state.keys_used == N {
-                        println!("Thread {}: All images loaded. Notifying main thread.", thread_id);
-                        cvar.notify_all();
-                        break; // Exit the loop, this thread's work is done.
-                    }
-                } else {
-                    // No work to claim, so all work is done.
-                    // This thread can exit.
+                // Check if all images are loaded.
+                if state.image_states.iter().all(|&s| s == ImageState::Loaded) {
                     break;
                 }
-                // --- End of critical section (lock is released) ---
+
+                // --- Try to perform an action ---
+
+                // Action: SetKey(i)
+                // Pre: keys = "Generated" AND image_states[i] = "PendingKey"
+                if state.keys == KeyState::Generated {
+                    if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::PendingKey) {
+                        state.keys = KeyState::Empty;
+                        state.image_states[idx] = ImageState::HasKey;
+                        state.keys_used += 1;
+                        println!("Thread {}: SetKey for image {} (total keys used: {})", thread_id, Image(idx).0, state.keys_used);
+                        cvar.notify_all();
+                        continue; // Restart loop to release lock and re-evaluate state
+                    }
+                }
+
+                // Action: FinishLoad(i)
+                // Pre: image_states[i] = "HasKey"
+                if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::HasKey) {
+                    state.image_states[idx] = ImageState::Loaded;
+                    println!("Thread {}: FinishLoad for image {}", thread_id, Image(idx).0);
+                    cvar.notify_all();
+                    continue;
+                }
+
+                // Action: StartLoad(i)
+                // Pre: image_states[i] = "None" AND no other image is "PendingKey"
+                let is_any_pending = state.image_states.iter().any(|s| *s == ImageState::PendingKey);
+                if !is_any_pending {
+                    if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::None) {
+                        state.image_states[idx] = ImageState::PendingKey;
+                        println!("Thread {}: StartLoad for image {}", thread_id, Image(idx).0);
+                        cvar.notify_all();
+                        continue;
+                    }
+                }
+
+                // If no action could be taken, wait for a state change.
+                state = cvar.wait(state).unwrap();
             }
         });
         handles.push(handle);
     }
 
     // Main thread waits until the `Done` condition is met.
-    // This block ensures the lock is released before joining the threads.
     {
         let (lock, cvar) = &*pair;
         let mut state = lock.lock().unwrap();
-        while state.keys_used < N {
-            // The condvar atomically unlocks the mutex and waits for a worker to signal.
+        // Wait until all images are fully loaded.
+        while state.image_states.iter().any(|&s| s != ImageState::Loaded) {
             state = cvar.wait(state).unwrap();
         }
     } // The lock (`state` guard) is released here.
