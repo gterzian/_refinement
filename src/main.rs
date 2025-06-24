@@ -45,37 +45,8 @@ fn main() {
 
     let mut handles = vec![];
 
-    // --- Key Generator Thread ---
-    // This thread is responsible for the `GenerateKey` action.
-    let key_gen_pair = Arc::clone(&pair);
-    let key_gen_handle = thread::spawn(move || {
-        loop {
-            let (lock, cvar) = &*key_gen_pair;
-            let mut state = lock.lock().unwrap();
-
-            // Wait until a key is requested AND the key slot is empty.
-            // Precondition for `GenerateKey`: `\E i: image_states[i] = "PendingKey" /\ keys = "Empty"`
-            state = cvar.wait_while(state, |s| {
-                (s.image_states.iter().all(|&st| st != ImageState::PendingKey) || s.keys != KeyState::Empty)
-                && s.keys_used < N
-            }).unwrap();
-
-            // If all keys have been set, no more keys will be requested.
-            if state.keys_used == N {
-                break;
-            }
-
-            // As per `GenerateKey`, this thread only modifies `keys`.
-            println!("KeyGen: Generating key...");
-            state.keys = KeyState::Generated;
-            println!("KeyGen: Key is 'Generated'.");
-
-            cvar.notify_all(); // Notify workers that the key is ready.
-        }
-    });
-    handles.push(key_gen_handle);
-
-    // --- Image Loader Threads ---
+    // --- Worker Threads ---
+    // The system now uses only two threads, which handle all actions.
     for thread_id in 0..2 {
         let pair_clone = Arc::clone(&pair);
         let handle = thread::spawn(move || {
@@ -83,23 +54,34 @@ fn main() {
                 let (lock, cvar) = &*pair_clone;
                 let mut state = lock.lock().unwrap();
 
-                // Check if all images are loaded.
+                // Check if all images are loaded (Done condition).
                 if state.image_states.iter().all(|&s| s == ImageState::Loaded) {
                     break;
                 }
 
-                // --- Try to perform an action ---
+                // --- Try to perform any enabled action ---
+
+                let pending_idx = state.image_states.iter().position(|s| *s == ImageState::PendingKey);
+
+                // Action: GenerateKey
+                // Pre: (\E i: image_states[i] = "PendingKey") AND (keys = "Empty")
+                if pending_idx.is_some() && state.keys == KeyState::Empty {
+                    state.keys = KeyState::Generated;
+                    println!("Thread {}: Generated key.", thread_id);
+                    cvar.notify_all();
+                    continue;
+                }
 
                 // Action: SetKey(i)
                 // Pre: keys = "Generated" AND image_states[i] = "PendingKey"
                 if state.keys == KeyState::Generated {
-                    if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::PendingKey) {
+                    if let Some(idx) = pending_idx {
                         state.keys = KeyState::Empty;
                         state.image_states[idx] = ImageState::HasKey;
                         state.keys_used += 1;
                         println!("Thread {}: SetKey for image {} (total keys used: {})", thread_id, Image(idx).0, state.keys_used);
                         cvar.notify_all();
-                        continue; // Restart loop to release lock and re-evaluate state
+                        continue;
                     }
                 }
 
@@ -114,8 +96,7 @@ fn main() {
 
                 // Action: StartLoad(i)
                 // Pre: image_states[i] = "None" AND no other image is "PendingKey"
-                let is_any_pending = state.image_states.iter().any(|s| *s == ImageState::PendingKey);
-                if !is_any_pending {
+                if pending_idx.is_none() {
                     if let Some(idx) = state.image_states.iter().position(|s| *s == ImageState::None) {
                         state.image_states[idx] = ImageState::PendingKey;
                         println!("Thread {}: StartLoad for image {}", thread_id, Image(idx).0);
