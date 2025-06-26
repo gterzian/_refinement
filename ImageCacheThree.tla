@@ -36,7 +36,7 @@ StartKeyGeneration(t) == LET
                          keys_needed == keys_requested - Len(keys)
                       IN
                      /\ \A tt \in Thread: pending_keys[tt] = FALSE
-                     /\ pending_keys' = [pending_keys EXCEPT ![t] = TRUE]
+                     /\ pending_keys' = [pending_keys EXCEPT ![t] = keys_needed > 0]
                      /\ keys_batch' = TRUE
                      /\ UNCHANGED<<image_states, image_queue, keys_used, keys>>
 
