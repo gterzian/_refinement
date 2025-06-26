@@ -15,7 +15,7 @@ please implement a multithreaded system in `main.rs` with the following features
   - Do not mention the reason for, or the source of, the comment(avoid things like: "as per the spec", "following the prompt", "the prompt requires").
   - Do not comment the equivalent of the `UNCHANGED` conditions.  
 - Document data structures and their members with `///`, and use `//` for inline comments.
-- Simpler is better: each iteration of the thread should perform only one action(exceptions will be formulated in follow-up prompts if needed), and each iteration should end with a wait on the condvar, unless the system is stopping. 
+- Simpler is better: each iteration of the thread should perform only one action(exceptions will be formulated in follow-up prompts if needed), and each iteration should end with a wait on the condvar, unless the system is stopping or following this constraints would produce a livelock not modeled in the spec(this should be documented).
 - Do not add variables not found in the spec, unless absolutely necessary to translate it into idiomatic Rust(this you can explain in a comment, in an exception to the ban on additional comments stated above). 
   - As an example: if the `Done` state of the spec can be computed from existing variables, a `done` variable or field to a struct is redundant and should be avoided. 
 - Do not add explanations to what you are doing in your chat response. The code should speak for itself. 

@@ -122,34 +122,27 @@ fn main() {
                 //             \/ GenerateKeys(t)
                 let mut action_taken = false;
 
-                // StartKeyGeneration(t)
-                // /\ \A tt \in Thread: pending_keys[tt] = FALSE
+                // Note: To fix a livelock, StartKeyGeneration and GenerateKeys are combined.
+                // A thread that starts generating keys will complete the process in the same turn.
                 if !guard.pending_keys {
-                    // /\ pending_keys' = [pending_keys EXCEPT ![t] = TRUE]
+                    // This corresponds to StartKeyGeneration(t)
                     guard.pending_keys = true;
-                    action_taken = true;
-                }
 
-                if !action_taken {
-                    // GenerateKeys(t)
-                    // /\ pending_keys[t] = TRUE
-                    if guard.pending_keys {
-                        // LET keys_requested == Cardinality({i \in Image: image_states[i] = "PendingKey"})
-                        let keys_requested = guard
-                            .image_states
-                            .values()
-                            .filter(|&&s| s == ImageState::PendingKey)
-                            .count();
-                        // LET keys_needed == keys_requested - Len(keys)
-                        let keys_needed = keys_requested.saturating_sub(guard.keys.len());
+                    // This corresponds to GenerateKeys(t)
+                    let keys_requested = guard
+                        .image_states
+                        .values()
+                        .filter(|&&s| s == ImageState::PendingKey)
+                        .count();
+                    let keys_needed = keys_requested.saturating_sub(guard.keys.len());
+                    if keys_needed > 0 {
                         // LET batch == [i \in 1..keys_needed |-> "Generated"]
                         let batch: VecDeque<Key> = (0..keys_needed).map(|_| Key).collect();
                         // /\ keys' = keys \o batch
                         guard.keys.extend(batch);
-                        // /\ pending_keys' = [pending_keys EXCEPT ![t] = FALSE]
-                        guard.pending_keys = false;
                         action_taken = true;
                     }
+                    guard.pending_keys = false;
                 }
 
                 if !action_taken {
