@@ -14,7 +14,7 @@ TypeOk == /\ image_states \in [Image -> ImageState]
           /\ keys_used \in Int
           /\ keys \in Seq({"Generated"})
           /\ keys_batch \in BOOLEAN
-          /\ pending_keys \in [Thread -> BOOLEAN]
+          /\ pending_keys \in [Thread -> Int]
          
 Inv == Len(keys) > 0 => Len(keys) =< Cardinality({i \in Image: image_states[i] = "PendingKey"})
 -----------------------------------------------------------------------------
@@ -24,7 +24,7 @@ Init == /\ image_states = [i \in Image |-> "None"]
         /\ keys_used = 0
         /\ keys = <<>>
         /\ keys_batch = FALSE
-        /\ pending_keys = [t \in Thread |-> FALSE]
+        /\ pending_keys = [t \in Thread |-> 0]
         
 StartLoad(i) == /\ image_states[i] = "None"
                 /\ image_states' = [image_states EXCEPT ![i] = "PendingKey"]
@@ -35,18 +35,16 @@ StartKeyGeneration(t) == LET
                          keys_requested == Cardinality({i \in Image: image_states[i] = "PendingKey"})
                          keys_needed == keys_requested - Len(keys)
                       IN
-                     /\ \A tt \in Thread: pending_keys[tt] = FALSE
-                     /\ pending_keys' = [pending_keys EXCEPT ![t] = keys_needed > 0]
+                     /\ \A tt \in Thread: pending_keys[tt] = 0
+                     /\ pending_keys' = [pending_keys EXCEPT ![t] = keys_needed]
                      /\ keys_batch' = TRUE
                      /\ UNCHANGED<<image_states, image_queue, keys_used, keys>>
 
 GenerateKeys(t) == LET 
-                    keys_requested == Cardinality({i \in Image: image_states[i] = "PendingKey"})
-                    keys_needed == keys_requested - Len(keys)
-                    batch == [i \in 1..keys_needed |-> "Generated"]
+                    batch == [i \in 1..pending_keys[t] |-> "Generated"]
                 IN
-                /\ pending_keys[t] = TRUE
-                /\ pending_keys' = [pending_keys EXCEPT ![t] = FALSE]
+                /\ pending_keys[t] > 0
+                /\ pending_keys' = [pending_keys EXCEPT ![t] = 0]
                 /\ keys' = keys \o batch
                 /\ UNCHANGED<<image_states, image_queue, keys_used, keys_batch>>
 
@@ -68,7 +66,6 @@ DequeImage(i) == /\ Len(image_queue) > 0
                  /\ image_states[i] = "Loaded"
                  /\ Head(image_queue) = i
                  /\ image_queue' = Tail(image_queue)
-                 \*/\ keys' = <<>>
                  /\ keys_batch' = FALSE
                  /\ UNCHANGED<<image_states, keys_used, keys, pending_keys>>
 

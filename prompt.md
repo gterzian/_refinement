@@ -1,7 +1,7 @@
 Using the TLA+ spec attached to the context as a design document, 
 please implement a multithreaded system in `main.rs` with the following features:
 
-- It should run a configurable number of threads that all are able to perform all spec actions(no naming of threads or assigning roles to them). The `N` in the spec should be configurable separatly from the number of threads(please document how to use the program, with example, in your response in the chat).
+- It should run a configurable number of threads that all are able to perform all spec actions:no naming of threads or assigning roles to them, unless that is implied by the spec. The `N` in the spec should be configurable separatly from the number of threads(please document how to use the program, with example, in your response in the chat).
 - The threads should share a struct, protected by a mutex, and associated with a condvar.
 - The shared struct should contain the data translated from the TLA+ variables ino their equivalent to idiomatic Rust.
 - For sets used in the spec as the domain of functions, translate those into Rust not with a set but with a vector of structs implementing the newtype pattern(where the sole field of the struct corresponds to the type of the set).
