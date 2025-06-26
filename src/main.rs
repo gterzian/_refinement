@@ -1,182 +1,129 @@
-use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::env;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
 
-// From TLA+ spec: CONSTANT N
-const N: usize = 10;
-const NUM_THREADS: usize = 2;
+// CONSTANT N
+// Note: N is provided as a command-line argument.
 
-// From TLA+ spec: ImageState == {"None", "PendingKey", "HasKey", "Loaded"}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Image == 1..N
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+struct Image(usize);
+
+/// ImageState == {"None", "Loaded"}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 enum ImageState {
+    #[default]
     None,
-    PendingKey,
-    HasKey,
     Loaded,
 }
 
-// The TLA+ spec defines `Image == 1..N`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Image(usize);
-
-// From TLA+ spec: VARIABLES image_states, image_queue, keys_used, keys, pending_keys
+/// TypeOk == /\ image_states \in [Image -> ImageState]
+///           /\ keys_used \in Int
 struct SharedState {
-    image_states: Vec<ImageState>,
-    image_queue: VecDeque<Image>,
-    keys_used: usize,
-    keys: VecDeque<()>, // Represents a sequence of "Generated" keys
-    pending_keys: Vec<bool>,
+    /// image_states \in [Image -> ImageState]
+    image_states: HashMap<Image, ImageState>,
+    /// keys_used \in Int
+    keys_used: u32,
 }
 
 fn main() {
-    // From TLA+ spec: Init
-    let pair = Arc::new((
-        Mutex::new(SharedState {
-            image_states: vec![ImageState::None; N],
-            image_queue: VecDeque::new(),
-            keys_used: 0,
-            keys: VecDeque::new(),
-            pending_keys: vec![false; NUM_THREADS],
-        }),
-        Condvar::new(),
-    ));
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        eprintln!("Usage: cargo run -- <N> <NUM_THREADS>");
+        std::process::exit(1);
+    }
 
+    let n: usize = args[1].parse().expect("N must be a positive integer");
+    let num_threads: usize = args[2]
+        .parse()
+        .expect("NUM_THREADS must be a positive integer");
+
+    // Image == 1..N
+    let images: Vec<Image> = (1..=n).map(Image).collect();
+
+    // Init
+    let initial_state = {
+        // /\ image_states = [i \in Image |-> "None"]
+        let image_states = images.iter().map(|&i| (i, ImageState::default())).collect();
+        // /\ keys_used = 0
+        let keys_used = 0;
+
+        SharedState {
+            image_states,
+            keys_used,
+        }
+    };
+
+    let lock = Arc::new(Mutex::new(initial_state));
+    let cvar = Arc::new(Condvar::new());
     let mut handles = vec![];
 
-    for thread_id in 0..NUM_THREADS {
-        let pair_clone = Arc::clone(&pair);
-        let handle = thread::spawn(move || {
-            loop {
-                let (lock, cvar) = &*pair_clone;
-                let mut state = lock.lock().unwrap();
+    for _ in 0..num_threads {
+        let lock_clone = Arc::clone(&lock);
+        let cvar_clone = Arc::clone(&cvar);
+        let images_clone = images.clone();
 
-                // Done condition
-                if state.image_states.iter().all(|&s| s == ImageState::Loaded)
-                    && state.image_queue.is_empty()
+        let handle = thread::spawn(move || {
+            let mut guard = lock_clone.lock().unwrap();
+            // BlockingSpec  ==  Init  /\  [][Next]_<<image_states, keys_used>>
+            loop {
+                // Done
+                // /\ \A ii \in Image: image_states[ii] = "Loaded"
+                if guard
+                    .image_states
+                    .values()
+                    .all(|&s| s == ImageState::Loaded)
                 {
+                    // Note: The system stops when the Done action is the only one possible.
+                    cvar_clone.notify_all();
                     break;
                 }
 
-                // --- Try to perform any enabled action ---
+                // Next == \/ \E i \in Image: \/ LoadImage(i)
+                let mut action_taken = false;
+                // \E i \in Image
+                for &image in images_clone.iter() {
+                    // LoadImage(i)
+                    // /\ image_states[i] = "None"
+                    if guard.image_states.get(&image) == Some(&ImageState::None) {
+                        // /\ keys_used' = keys_used + 1
+                        guard.keys_used += 1;
+                        // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
+                        guard.image_states.insert(image, ImageState::Loaded);
 
-                // Action: DequeImage(i)
-                if let Some(&image) = state.image_queue.front() {
-                    if state.image_states[image.0] == ImageState::Loaded {
-                        let dequeued_image = state.image_queue.pop_front().unwrap();
-                        // The line `keys' = <<>>` is commented out in the spec, so keys are unchanged.
-                        println!("Thread {}: Dequeued image {}", thread_id, dequeued_image.0);
-                        cvar.notify_all();
-                        continue;
+                        action_taken = true;
+                        // Note: A thread performs only one action per iteration before waiting.
+                        break;
                     }
                 }
 
-                // Action: FinishLoad(i)
-                if let Some(&image) = state.image_queue.front() {
-                    if state.image_states[image.0] == ImageState::HasKey {
-                        state.image_states[image.0] = ImageState::Loaded;
-                        println!("Thread {}: Finished load for image {}", thread_id, image.0);
-                        cvar.notify_all();
-                        continue;
-                    }
+                if action_taken {
+                    cvar_clone.notify_all();
                 }
 
-                // Action: SetKey(i)
-                if !state.keys.is_empty() {
-                    if let Some(&image) = state.image_queue.front() {
-                        if state.image_states[image.0] == ImageState::PendingKey {
-                            state.keys.pop_front();
-                            state.image_states[image.0] = ImageState::HasKey;
-                            state.keys_used += 1;
-                            println!("Thread {}: Set key for image {}", thread_id, image.0);
-                            cvar.notify_all();
-                            continue;
-                        }
-                    }
-                }
-
-                // Action: StartKeyGeneration(t) and GenerateKeys(t) are combined.
-                let keys_requested = state
-                    .image_states
-                    .iter()
-                    .filter(|&&s| s == ImageState::PendingKey)
-                    .count();
-                let keys_to_generate = keys_requested.saturating_sub(state.keys.len());
-                let no_one_generating = state.pending_keys.iter().all(|&p| !p);
-                if keys_to_generate > 0 && no_one_generating {
-                    // Claim the right to generate keys
-                    state.pending_keys[thread_id] = true;
-                    println!(
-                        "Thread {}: Starting generation for {} key(s)...",
-                        thread_id, keys_to_generate
-                    );
-
-                    // Release the lock to perform work outside the critical section
-                    drop(state);
-                    // The amount of work is proportional to the number of keys needed.
-                    thread::sleep(Duration::from_millis(250 * keys_to_generate as u64));
-
-                    // Re-acquire the lock to commit the work
-                    let mut state = lock.lock().unwrap();
-
-                    // Now perform the GenerateKeys action logic using the pre-calculated amount.
-                    for _ in 0..keys_to_generate {
-                        state.keys.push_back(());
-                    }
-                    println!(
-                        "Thread {}: Finished generating {} key(s).",
-                        thread_id, keys_to_generate
-                    );
-
-                    // Unset the flag, allowing another thread to generate if needed
-                    state.pending_keys[thread_id] = false;
-                    cvar.notify_all();
-                    continue;
-                }
-
-                // Action: StartLoad(i)
-                if let Some(idx) = state
-                    .image_states
-                    .iter()
-                    .position(|&s| s == ImageState::None)
-                {
-                    state.image_states[idx] = ImageState::PendingKey;
-                    state.image_queue.push_back(Image(idx));
-                    println!("Thread {}: Started load for image {}", thread_id, idx);
-                    cvar.notify_all();
-                    continue;
-                }
-
-                // If no action could be taken, wait for a state change.
-                state = cvar.wait(state).unwrap();
+                guard = cvar_clone.wait(guard).unwrap();
             }
         });
         handles.push(handle);
     }
 
-    // Main thread waits until the `Done` condition is met.
-    {
-        let (lock, cvar) = &*pair;
-        let mut state = lock.lock().unwrap();
-        while state.image_states.iter().any(|&s| s != ImageState::Loaded) {
-            state = cvar.wait(state).unwrap();
-        }
-    }
-
-    println!("\nMain thread: All images have been loaded. Joining worker threads.");
     for handle in handles {
         handle.join().unwrap();
     }
 
-    println!("\nFinal state:");
-    let (lock, _) = &*pair;
-    let state = lock.lock().unwrap();
-    assert!(state.keys.is_empty(), "Keys should be empty at the end.");
-    assert!(
-        state.image_queue.is_empty(),
-        "Image queue should be empty at the end."
+    println!("All images loaded successfully.");
+
+    let final_state = lock.lock().unwrap();
+    assert_eq!(
+        final_state.keys_used, n as u32,
+        "Final keys_used should be N"
     );
-    println!("  Keys used: {}", state.keys_used);
-    println!("  Image queue length: {}", state.image_queue.len());
-    println!("System stopped.");
+    assert!(
+        final_state
+            .image_states
+            .values()
+            .all(|&s| s == ImageState::Loaded),
+        "All images should be in the 'Loaded' state"
+    );
 }
