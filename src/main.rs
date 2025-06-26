@@ -106,8 +106,11 @@ fn main() {
                     .image_states
                     .values()
                     .all(|&s| s == ImageState::Loaded)
+                    && guard.image_queue.is_empty()
                 {
                     // Note: The system stops when the Done action is the only one possible.
+                    // This requires the image_queue to be empty, otherwise DequeImage would
+                    // still be enabled.
                     cvar_clone.notify_all();
                     break;
                 }
