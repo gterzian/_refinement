@@ -8,7 +8,7 @@ please implement a multithreaded system in `main.rs` with the following features
 - For sets used as the codomain of functions, use an enum, derive `Default`, and mark the right variant as default(based on the `Init` action) using `#[default]`. 
 - Functions should be translate as `HashMap`, where the key is the newtype struct representing the domain, and the value is the enum representing the codomain.
 - If the system it meant to end with infinite stuttering steps(for example: stuttering of a `Done` action), the Rust implementation should stop. Please join on the threads when stopping.
-- After joining the threads, print "All images loaded successfully." to the console. Then, add assertions about the final state of the program that seem to make sense to check that the program implements the spec.
+- After joining the threads, print "Program ran successfully and now stops." to the console. Then, add assertions about the final state of the program that seem to make sense in order to check that the program implements the spec.
 - When adding comments: 
   - only copy paste from the spec to a Rust comment, do not add additional comments(one exception below). 
   - Use granular comments, for example: document a block of Rust code(be it an actual block, a function, a method, or just a few lines of code) implementing that action with only the name of the action, and then document each line implementing one or several pre- and post-condition of the action with the corresponding line from the spec. If the Rust code does not map to the spec line to line, explain why in a comment starting with `// Note: `. 

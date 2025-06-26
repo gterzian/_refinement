@@ -10,21 +10,34 @@ use std::thread;
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 struct Image(usize);
 
-/// ImageState == {"None", "Loaded"}
+/// ImageState == {"None", "PendingKey", "HasKey", "Loaded"}
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 enum ImageState {
     #[default]
     None,
+    PendingKey,
+    HasKey,
     Loaded,
+}
+
+/// keys \in {"Empty", "Generated"}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+enum Keys {
+    #[default]
+    Empty,
+    Generated,
 }
 
 /// TypeOk == /\ image_states \in [Image -> ImageState]
 ///           /\ keys_used \in Int
+///           /\ keys \in {"Empty", "Generated"}
 struct SharedState {
     /// image_states \in [Image -> ImageState]
     image_states: HashMap<Image, ImageState>,
     /// keys_used \in Int
     keys_used: u32,
+    /// keys \in {"Empty", "Generated"}
+    keys: Keys,
 }
 
 fn main() {
@@ -48,10 +61,13 @@ fn main() {
         let image_states = images.iter().map(|&i| (i, ImageState::default())).collect();
         // /\ keys_used = 0
         let keys_used = 0;
+        // /\ keys = "Empty"
+        let keys = Keys::default();
 
         SharedState {
             image_states,
             keys_used,
+            keys,
         }
     };
 
@@ -66,7 +82,7 @@ fn main() {
 
         let handle = thread::spawn(move || {
             let mut guard = lock_clone.lock().unwrap();
-            // BlockingSpec  ==  Init  /\  [][Next]_<<image_states, keys_used>>
+            // NonBlockingSpec  ==  Init  /\  [][Next]_<<image_states, keys_used, keys>>
             loop {
                 // Done
                 // /\ \A ii \in Image: image_states[ii] = "Loaded"
@@ -80,21 +96,76 @@ fn main() {
                     break;
                 }
 
-                // Next == \/ \E i \in Image: \/ LoadImage(i)
+                // Next == \/ \E i \in Image: \/ StartLoad(i)
+                //                            \/ SetKey(i)
+                //                            \/ FinishLoad(i)
+                //         \/ Done
+                //         \/ GenerateKey
                 let mut action_taken = false;
-                // \E i \in Image
-                for &image in images_clone.iter() {
-                    // LoadImage(i)
-                    // /\ image_states[i] = "None"
-                    if guard.image_states.get(&image) == Some(&ImageState::None) {
-                        // /\ keys_used' = keys_used + 1
-                        guard.keys_used += 1;
-                        // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
-                        guard.image_states.insert(image, ImageState::Loaded);
 
+                // GenerateKey
+                // /\ \E i \in Image: image_states[i] = "PendingKey"
+                if guard
+                    .image_states
+                    .values()
+                    .any(|&s| s == ImageState::PendingKey)
+                {
+                    // /\ keys = "Empty"
+                    if guard.keys == Keys::Empty {
+                        // /\ keys' = "Generated"
+                        guard.keys = Keys::Generated;
                         action_taken = true;
-                        // Note: A thread performs only one action per iteration before waiting.
-                        break;
+                    }
+                }
+
+                if !action_taken {
+                    // \E i \in Image
+                    for &image in images_clone.iter() {
+                        let current_state = *guard.image_states.get(&image).unwrap();
+
+                        match current_state {
+                            ImageState::None => {
+                                // StartLoad(i)
+                                // /\ image_states[i] = "None"
+                                // /\ \A ii \in Image: image_states[ii] # "PendingKey"
+                                if !guard
+                                    .image_states
+                                    .values()
+                                    .any(|&s| s == ImageState::PendingKey)
+                                {
+                                    // /\ image_states' = [image_states EXCEPT ![i] = "PendingKey"]
+                                    guard.image_states.insert(image, ImageState::PendingKey);
+                                    action_taken = true;
+                                }
+                            }
+                            ImageState::PendingKey => {
+                                // SetKey(i)
+                                // /\ image_states[i] = "PendingKey"
+                                // /\ keys = "Generated"
+                                if guard.keys == Keys::Generated {
+                                    // /\ keys' = "Empty"
+                                    guard.keys = Keys::Empty;
+                                    // /\ keys_used' = keys_used + 1
+                                    guard.keys_used += 1;
+                                    // /\ image_states' = [image_states EXCEPT ![i] = "HasKey"]
+                                    guard.image_states.insert(image, ImageState::HasKey);
+                                    action_taken = true;
+                                }
+                            }
+                            ImageState::HasKey => {
+                                // FinishLoad(i)
+                                // /\ image_states[i] = "HasKey"
+                                // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
+                                guard.image_states.insert(image, ImageState::Loaded);
+                                action_taken = true;
+                            }
+                            ImageState::Loaded => {}
+                        }
+
+                        if action_taken {
+                            // Note: A thread performs only one action per iteration before waiting.
+                            break;
+                        }
                     }
                 }
 
@@ -112,7 +183,7 @@ fn main() {
         handle.join().unwrap();
     }
 
-    println!("All images loaded successfully.");
+    println!("Program ran successfully and now stops.");
 
     let final_state = lock.lock().unwrap();
     assert_eq!(
@@ -126,4 +197,7 @@ fn main() {
             .all(|&s| s == ImageState::Loaded),
         "All images should be in the 'Loaded' state"
     );
+    // Note: When all images are loaded, the last action on `keys` must have been
+    // `SetKey`, which sets it to `Empty`. No other action can change it after that.
+    assert_eq!(final_state.keys, Keys::Empty, "Final keys should be Empty");
 }
