@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -20,24 +20,30 @@ enum ImageState {
     Loaded,
 }
 
-/// keys \in {"Empty", "Generated"}
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
-enum Keys {
-    #[default]
-    Empty,
-    Generated,
-}
+// Note: Represents a "Generated" key from the spec.
+#[derive(Debug)]
+struct Key;
 
 /// TypeOk == /\ image_states \in [Image -> ImageState]
+///           /\ image_queue \in Seq(Image)
 ///           /\ keys_used \in Int
-///           /\ keys \in {"Empty", "Generated"}
+///           /\ keys \in Seq({"Generated"})
+///           /\ pending_keys \in [Thread -> BOOLEAN]
 struct SharedState {
     /// image_states \in [Image -> ImageState]
     image_states: HashMap<Image, ImageState>,
+    /// image_queue \in Seq(Image)
+    image_queue: VecDeque<Image>,
     /// keys_used \in Int
     keys_used: u32,
-    /// keys \in {"Empty", "Generated"}
-    keys: Keys,
+    /// keys \in Seq({"Generated"})
+    keys: VecDeque<Key>,
+    // Note: This single boolean represents the state of `pending_keys`.
+    // `false` means `\A t \in Thread: pending_keys[t] = FALSE`.
+    // `true` means `\E t \in Thread: pending_keys[t] = TRUE`.
+    // This is necessary because threads are anonymous in this implementation.
+    /// pending_keys \in [Thread -> BOOLEAN]
+    pending_keys: bool,
 }
 
 fn main() {
@@ -54,20 +60,30 @@ fn main() {
 
     // Image == 1..N
     let images: Vec<Image> = (1..=n).map(Image).collect();
+    // Note: The spec defines `Thread == 1..N`, which would tie the number of threads to the
+    // number of images `N`. The prompt requires the number of threads to be configurable
+    // independently. The implementation of `pending_keys` with a single boolean accommodates
+    // this requirement by abstracting away thread identities.
 
     // Init
     let initial_state = {
         // /\ image_states = [i \in Image |-> "None"]
         let image_states = images.iter().map(|&i| (i, ImageState::default())).collect();
+        // /\ image_queue = <<>>
+        let image_queue = VecDeque::new();
         // /\ keys_used = 0
         let keys_used = 0;
-        // /\ keys = "Empty"
-        let keys = Keys::default();
+        // /\ keys = <<>>
+        let keys = VecDeque::new();
+        // /\ pending_keys = [t \in Thread |-> FALSE]
+        let pending_keys = false;
 
         SharedState {
             image_states,
+            image_queue,
             keys_used,
             keys,
+            pending_keys,
         }
     };
 
@@ -82,7 +98,7 @@ fn main() {
 
         let handle = thread::spawn(move || {
             let mut guard = lock_clone.lock().unwrap();
-            // NonBlockingSpec  ==  Init  /\  [][Next]_<<image_states, keys_used, keys>>
+            // BatchingSpec  ==  Init  /\  [][Next]_<<...>>
             loop {
                 // Done
                 // /\ \A ii \in Image: image_states[ii] = "Loaded"
@@ -97,72 +113,100 @@ fn main() {
                 }
 
                 // Next == \/ \E i \in Image: \/ StartLoad(i)
-                //                            \/ SetKey(i)
-                //                            \/ FinishLoad(i)
+                //                           \/ FinishLoad(i)
+                //                           \/ DequeImage(i)
+                //                           \/ SetKey(i)
                 //         \/ Done
-                //         \/ GenerateKey
+                //         \/ \E t \in Thread:
+                //             \/ StartKeyGeneration(t)
+                //             \/ GenerateKeys(t)
                 let mut action_taken = false;
 
-                // GenerateKey
-                // /\ \E i \in Image: image_states[i] = "PendingKey"
-                if guard
-                    .image_states
-                    .values()
-                    .any(|&s| s == ImageState::PendingKey)
-                {
-                    // /\ keys = "Empty"
-                    if guard.keys == Keys::Empty {
-                        // /\ keys' = "Generated"
-                        guard.keys = Keys::Generated;
+                // StartKeyGeneration(t)
+                // /\ \A tt \in Thread: pending_keys[tt] = FALSE
+                if !guard.pending_keys {
+                    // /\ pending_keys' = [pending_keys EXCEPT ![t] = TRUE]
+                    guard.pending_keys = true;
+                    action_taken = true;
+                }
+
+                if !action_taken {
+                    // GenerateKeys(t)
+                    // /\ pending_keys[t] = TRUE
+                    if guard.pending_keys {
+                        // LET keys_requested == Cardinality({i \in Image: image_states[i] = "PendingKey"})
+                        let keys_requested = guard
+                            .image_states
+                            .values()
+                            .filter(|&&s| s == ImageState::PendingKey)
+                            .count();
+                        // LET keys_needed == keys_requested - Len(keys)
+                        let keys_needed = keys_requested.saturating_sub(guard.keys.len());
+                        // LET batch == [i \in 1..keys_needed |-> "Generated"]
+                        let batch: VecDeque<Key> = (0..keys_needed).map(|_| Key).collect();
+                        // /\ keys' = keys \o batch
+                        guard.keys.extend(batch);
+                        // /\ pending_keys' = [pending_keys EXCEPT ![t] = FALSE]
+                        guard.pending_keys = false;
                         action_taken = true;
+                    }
+                }
+
+                if !action_taken {
+                    if let Some(&image_at_head) = guard.image_queue.front() {
+                        let state_at_head = *guard.image_states.get(&image_at_head).unwrap();
+
+                        match state_at_head {
+                            ImageState::PendingKey => {
+                                // SetKey(i)
+                                // /\ Head(image_queue) = i
+                                // /\ image_states[i] = "PendingKey"
+                                // /\ Len(keys) > 0
+                                if !guard.keys.is_empty() {
+                                    // /\ keys' = Tail(keys)
+                                    guard.keys.pop_front();
+                                    // /\ keys_used' = keys_used + 1
+                                    guard.keys_used += 1;
+                                    // /\ image_states' = [image_states EXCEPT ![i] = "HasKey"]
+                                    guard.image_states.insert(image_at_head, ImageState::HasKey);
+                                    action_taken = true;
+                                }
+                            }
+                            ImageState::HasKey => {
+                                // FinishLoad(i)
+                                // /\ Head(image_queue) = i
+                                // /\ image_states[i] = "HasKey"
+                                // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
+                                guard.image_states.insert(image_at_head, ImageState::Loaded);
+                                action_taken = true;
+                            }
+                            ImageState::Loaded => {
+                                // DequeImage(i)
+                                // /\ Len(image_queue) > 0
+                                // /\ Head(image_queue) = i
+                                // /\ image_states[i] = "Loaded"
+                                // /\ image_queue' = Tail(image_queue)
+                                guard.image_queue.pop_front();
+                                // /\ keys' = <<>>
+                                guard.keys.clear();
+                                action_taken = true;
+                            }
+                            ImageState::None => {}
+                        }
                     }
                 }
 
                 if !action_taken {
                     // \E i \in Image
                     for &image in images_clone.iter() {
-                        let current_state = *guard.image_states.get(&image).unwrap();
-
-                        match current_state {
-                            ImageState::None => {
-                                // StartLoad(i)
-                                // /\ image_states[i] = "None"
-                                // /\ \A ii \in Image: image_states[ii] # "PendingKey"
-                                if !guard
-                                    .image_states
-                                    .values()
-                                    .any(|&s| s == ImageState::PendingKey)
-                                {
-                                    // /\ image_states' = [image_states EXCEPT ![i] = "PendingKey"]
-                                    guard.image_states.insert(image, ImageState::PendingKey);
-                                    action_taken = true;
-                                }
-                            }
-                            ImageState::PendingKey => {
-                                // SetKey(i)
-                                // /\ image_states[i] = "PendingKey"
-                                // /\ keys = "Generated"
-                                if guard.keys == Keys::Generated {
-                                    // /\ keys' = "Empty"
-                                    guard.keys = Keys::Empty;
-                                    // /\ keys_used' = keys_used + 1
-                                    guard.keys_used += 1;
-                                    // /\ image_states' = [image_states EXCEPT ![i] = "HasKey"]
-                                    guard.image_states.insert(image, ImageState::HasKey);
-                                    action_taken = true;
-                                }
-                            }
-                            ImageState::HasKey => {
-                                // FinishLoad(i)
-                                // /\ image_states[i] = "HasKey"
-                                // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
-                                guard.image_states.insert(image, ImageState::Loaded);
-                                action_taken = true;
-                            }
-                            ImageState::Loaded => {}
-                        }
-
-                        if action_taken {
+                        // StartLoad(i)
+                        // /\ image_states[i] = "None"
+                        if *guard.image_states.get(&image).unwrap() == ImageState::None {
+                            // /\ image_states' = [image_states EXCEPT ![i] = "PendingKey"]
+                            guard.image_states.insert(image, ImageState::PendingKey);
+                            // /\ image_queue' = Append(image_queue, i)
+                            guard.image_queue.push_back(image);
+                            action_taken = true;
                             // Note: A thread performs only one action per iteration before waiting.
                             break;
                         }
@@ -197,7 +241,13 @@ fn main() {
             .all(|&s| s == ImageState::Loaded),
         "All images should be in the 'Loaded' state"
     );
-    // Note: When all images are loaded, the last action on `keys` must have been
-    // `SetKey`, which sets it to `Empty`. No other action can change it after that.
-    assert_eq!(final_state.keys, Keys::Empty, "Final keys should be Empty");
+    assert!(
+        final_state.image_queue.is_empty(),
+        "Final image_queue should be empty"
+    );
+    assert!(final_state.keys.is_empty(), "Final keys should be empty");
+    assert!(
+        !final_state.pending_keys,
+        "Final pending_keys should be false"
+    );
 }
