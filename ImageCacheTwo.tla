@@ -46,7 +46,7 @@ Next == \/ \E i \in Image: \/ StartLoad(i)
         \/ Done
         \/ GenerateKey
 -----------------------------------------------------------------------------
-NonBlockingSpec  ==  Init  /\  [][Next]_<<image_states, keys_used, keys>>
+StillBlockingSpec  ==  Init  /\  [][Next]_<<image_states, keys_used, keys>>
 
 StateBar[i \in Image] == IF image_states[i] \in {"PendingKey", "HasKey"}
                          THEN "Loaded" 
@@ -59,4 +59,6 @@ Bar == INSTANCE ImageCacheOne
             keys_used <- KeysBar
        
 BarSpec == Bar!BlockingSpec
+
+THEOREM StillBlockingSpec => BarSpec
 =============================================================================
