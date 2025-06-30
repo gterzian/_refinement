@@ -105,5 +105,5 @@ Bar == INSTANCE ImageCacheTwo
             keys_used <- KeysUsedBar,
             keys <- KeysBar
             
-BarSpec == Bar!NonBlockingSpec
+BarSpec == Bar!StillBlockingSpec
 =============================================================================
