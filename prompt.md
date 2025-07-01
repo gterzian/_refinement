@@ -23,3 +23,7 @@ please implement a multithreaded system in `main.rs` with the following features
 - Ensure your code compiles. 
 - Close delimiters.
 - Only use the standard library.
+
+
+#### Further changes made after review of the code
+- Further review of the code showed that only one key would be generated at a time, which led to the [following interaction](https://gist.github.com/gterzian/79a3c9ee6f306a067583bcbf00e9354c), resulting in this [final iteration of the code](https://github.com/gterzian/_refinement/blob/9d70e8ca8087ac38b66bfa598de5272151656fef/src/main.rs). 
