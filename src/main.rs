@@ -158,61 +158,63 @@ fn main() {
                         // /\ pending_keys' = [pending_keys EXCEPT ![t] = 0]
                         guard.pending_keys.remove(&id);
                     }
-                } else {
-                    if let Some(&image_at_head) = guard.image_queue.front() {
-                        let state_at_head = *guard.image_states.get(&image_at_head).unwrap();
+                }
 
-                        match state_at_head {
-                            ImageState::PendingKey => {
-                                // SetKey(i)
-                                // /\ Head(image_queue) = i
-                                // /\ image_states[i] = "PendingKey"
-                                // /\ Len(keys) > 0
-                                if !guard.keys.is_empty() {
-                                    // /\ keys' = Tail(keys)
-                                    guard.keys.pop_front();
-                                    // /\ keys_used' = keys_used + 1
-                                    guard.keys_used += 1;
-                                    // /\ image_states' = [image_states EXCEPT ![i] = "HasKey"]
-                                    guard.image_states.insert(image_at_head, ImageState::HasKey);
-                                    action_taken = true;
-                                }
-                            }
-                            ImageState::HasKey => {
-                                // FinishLoad(i)
-                                // /\ Head(image_queue) = i
-                                // /\ image_states[i] = "HasKey"
-                                // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
-                                guard.image_states.insert(image_at_head, ImageState::Loaded);
+                if let Some(&image_at_head) = guard.image_queue.front() {
+                    let state_at_head = *guard.image_states.get(&image_at_head).unwrap();
+
+                    match state_at_head {
+                        ImageState::PendingKey => {
+                            // SetKey(i)
+                            // /\ Head(image_queue) = i
+                            // /\ image_states[i] = "PendingKey"
+                            // /\ Len(keys) > 0
+                            if !guard.keys.is_empty() {
+                                // /\ keys' = Tail(keys)
+                                guard.keys.pop_front();
+                                // /\ keys_used' = keys_used + 1
+                                guard.keys_used += 1;
+                                // /\ image_states' = [image_states EXCEPT ![i] = "HasKey"]
+                                guard.image_states.insert(image_at_head, ImageState::HasKey);
                                 action_taken = true;
                             }
-                            ImageState::Loaded => {
-                                // DequeImage(i)
-                                // /\ Len(image_queue) > 0
-                                // /\ Head(image_queue) = i
-                                // /\ image_states[i] = "Loaded"
-                                // /\ image_queue' = Tail(image_queue)
-                                guard.image_queue.pop_front();
-                                action_taken = true;
-                            }
-                            ImageState::None => {}
                         }
+                        ImageState::HasKey => {
+                            // FinishLoad(i)
+                            // /\ Head(image_queue) = i
+                            // /\ image_states[i] = "HasKey"
+                            // /\ image_states' = [image_states EXCEPT ![i] = "Loaded"]
+                            guard.image_states.insert(image_at_head, ImageState::Loaded);
+                            action_taken = true;
+                        }
+                        ImageState::Loaded => {
+                            // DequeImage(i)
+                            // /\ Len(image_queue) > 0
+                            // /\ Head(image_queue) = i
+                            // /\ image_states[i] = "Loaded"
+                            // /\ image_queue' = Tail(image_queue)
+                            guard.image_queue.pop_front();
+                            action_taken = true;
+                        }
+                        ImageState::None => {}
                     }
+                }
 
-                    if !action_taken {
-                        // \E i \in Image
-                        for &image in images_clone.iter() {
-                            // StartLoad(i)
-                            // /\ image_states[i] = "None"
-                            if *guard.image_states.get(&image).unwrap() == ImageState::None {
-                                // /\ image_states' = [image_states EXCEPT ![i] = "PendingKey"]
-                                guard.image_states.insert(image, ImageState::PendingKey);
-                                // /\ image_queue' = Append(image_queue, i)
-                                guard.image_queue.push_back(image);
-                                action_taken = true;
-                                break;
-                            }
-                        }
+                // \E i \in Image
+                // Note: To increase non-determinism, we check for StartLoad regardless of
+                // whether other actions have been taken. This is allowed by the spec,
+                // as Next is a disjunction of all actions.
+                for &image in images_clone.iter() {
+                    // StartLoad(i)
+                    // /\ image_states[i] = "None"
+                    if *guard.image_states.get(&image).unwrap() == ImageState::None {
+                        // /\ image_states' = [image_states EXCEPT ![i] = "PendingKey"]
+                        guard.image_states.insert(image, ImageState::PendingKey);
+                        // /\ image_queue' = Append(image_queue, i)
+                        guard.image_queue.push_back(image);
+                        action_taken = true;
+                        // Note: Break after one to increase non-determinism.
+                        break;
                     }
                 }
 
