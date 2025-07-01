@@ -12,7 +12,7 @@ Note about the commit history:
 Steps used to get `main.rs` in [this state](https://github.com/gterzian/_refinement/blob/68666036d233045e885907f299d45c30ab10093e/src/main.rs):
 
 1.  Using Github Copilot chat, with Gemini 2.5 Pro as model.
-2.  Attached `ImageCacheOne.tla` and `prompt.md` to the context.
+2.  Deleted contents of `main.rs`(see note on commit history above), deleted chat history, and attached `ImageCacheOne.tla` and `prompt.md` to the context.
 3.  Prompted: "Do". This resulted in [this iteration of the code](https://github.com/gterzian/_refinement/commit/4874109e8dcdba9605f35283ce85c497629bfa5a).
 4.  Attached `ImageCacheTwo.tla` to context, and prompted:
     > Now, using `ImageCacheTwo.tla` as a design document, write a second iteration of the system according to the same guidelines in `prompt.md`.
