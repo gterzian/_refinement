@@ -5,7 +5,7 @@
 The steps used to get to [this state](https://github.com/gterzian/_refinement/blob/68666036d233045e885907f299d45c30ab10093e/src/main.rs) are described [here](steps.md).
 
 #### Further changes made after review of the code
-- Further review of the code showed that only one key would be generated at a time, which led to the [following interaction](code_review.md), resulting in this [final iteration of the code](/src/main.rs). 
+Further review of the code showed that only one key would be generated at a time, which led to the [following interaction](code_review.md), resulting in this [final iteration of the code](/src/main.rs). 
 
 #### Full chat history
 
