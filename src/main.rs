@@ -43,9 +43,10 @@ struct SharedState {
     /// keys \in Seq({"Generated"})
     keys: VecDeque<Key>,
     // Note: This maps a thread's ID to the number of keys it is pending,
-    // implementing `[Thread -> Int]`.
+    // implementing `[Thread -> Int]`. Since only one thread can be pending
+    // at a time, this is represented as an Option.
     /// pending_keys \in [Thread -> Int]
-    pending_keys: HashMap<ThreadId, usize>,
+    pending_keys: Option<(ThreadId, usize)>,
 }
 
 fn main() {
@@ -74,7 +75,7 @@ fn main() {
         // /\ keys = <<>>
         let keys = VecDeque::new();
         // /\ pending_keys = [t \in Thread |-> 0]
-        let pending_keys = HashMap::new();
+        let pending_keys = None;
 
         SharedState {
             image_states,
@@ -124,7 +125,7 @@ fn main() {
 
                 // StartKeyGeneration(t)
                 // /\ \A tt \in Thread: pending_keys[tt] = 0
-                if guard.pending_keys.is_empty() {
+                if guard.pending_keys.is_none() {
                     // LET keys_requested == Cardinality({i \in Image: image_states[i] = "PendingKey"})
                     let keys_requested = guard
                         .image_states
@@ -136,7 +137,7 @@ fn main() {
 
                     if keys_needed > 0 {
                         // /\ pending_keys' = [pending_keys EXCEPT ![t] = keys_needed]
-                        guard.pending_keys.insert(id, keys_needed);
+                        guard.pending_keys = Some((id, keys_needed));
                         keys_to_generate = Some(keys_needed);
                         action_taken = true;
                     }
@@ -152,11 +153,11 @@ fn main() {
 
                     // GenerateKeys(t)
                     // /\ pending_keys[t] > 0
-                    if guard.pending_keys.get(&id) == Some(&needed) {
+                    if guard.pending_keys == Some((id, needed)) {
                         // /\ keys' = keys \o batch
                         guard.keys.extend(batch);
                         // /\ pending_keys' = [pending_keys EXCEPT ![t] = 0]
-                        guard.pending_keys.remove(&id);
+                        guard.pending_keys = None;
                     }
                 }
 
@@ -252,7 +253,7 @@ fn main() {
     );
     assert!(final_state.keys.is_empty(), "Final keys should be empty");
     assert!(
-        final_state.pending_keys.is_empty(),
+        final_state.pending_keys.is_none(),
         "Final pending_keys should be empty"
     );
 }
