@@ -1,5 +1,8 @@
 ### Accompanying material for [`A Tale of Two Refinements`](https://medium.com/@polyglot_factotum/a-tale-of-two-refinements-f6cdb2a3e4d8)
 
+#### Full chat history
+
+The full chat history is available [here](chat_history.md).
 
 #### Note about the commit history:
 
@@ -62,3 +65,6 @@
     > - For clarity and consistency, use the newstruct pattern for the thread id as well.
     
     This resulted in [this iteration of the code](https://github.com/gterzian/_refinement/commit/68666036d233045e885907f299d45c30ab10093e)
+
+#### Further changes made after review of the code
+- Further review of the code showed that only one key would be generated at a time, which led to the [following interaction](https://gist.github.com/gterzian/79a3c9ee6f306a067583bcbf00e9354c), resulting in this [final iteration of the code](https://github.com/gterzian/_refinement/blob/9d70e8ca8087ac38b66bfa598de5272151656fef/src/main.rs). 
